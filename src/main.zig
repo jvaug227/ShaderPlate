@@ -5,6 +5,41 @@ const vkw = @import("vkw.zig");
 
 const Allocator = std.mem.Allocator;
 
+pub const std_options = .{
+
+    // Set the log level to info
+    .log_level = .info,
+
+    // Define logFn to override the std implementation
+    .logFn = myLogFn,
+};
+
+pub fn myLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+
+    // Ignore all non-error logging from sources other than
+    // .my_project, .nice_library and the default
+    const scope_prefix = "(" ++ switch (scope) {
+        std.log.default_log_scope => @tagName(scope),
+        else => if (@intFromEnum(level) <= @intFromEnum(std.log.Level.err))
+            @tagName(scope)
+        else
+            return,
+    } ++ "): ";
+
+    const prefix = "[" ++ comptime level.asText() ++ "] " ++ scope_prefix;
+
+    // Print the message to stderr, silently ignoring any errors
+    std.debug.lockStdErr();
+    defer std.debug.unlockStdErr();
+    const stderr = std.io.getStdErr().writer();
+    nosuspend stderr.print(prefix ++ format ++ "\n", args) catch return;
+}
+
 pub fn main() !void {
     const app_name = "Shader Plate";
 
@@ -23,7 +58,17 @@ pub fn main() !void {
     var window = try sdl.createWindow(app_name, .{ .centered = {} }, .{ .centered = {} }, initial_extent.width, initial_extent.height, .{ .vis = .shown, .context = .vulkan, .resizable = true });
     defer window.destroy();
 
-    const gc = try vkw.GraphicsContext.init(allocator, app_name, window);
+    const gc = vkw.GraphicsContext.init(allocator, app_name, window) catch |err| {
+        switch (err) {
+            error.NoSuitableDevice => {
+                std.log.err("Failed to find a suitable physical device (gpu) that matched all requirements", .{});
+            },
+            else => {
+                return err;
+            },
+        }
+        return;
+    };
     defer gc.deinit();
 
     var swapchain = try vkw.Swapchain.init(&gc, allocator, initial_extent);
@@ -85,7 +130,7 @@ pub fn main() !void {
                 },
                 else => {},
             }
-        }
+        } // while poll sdl events
 
         const cmdbuf = cmdbufs[swapchain.image_index];
         const present_state = swapchain.present(cmdbuf) catch |err| switch (err) {
@@ -125,7 +170,7 @@ fn createCommandBuffers(
     errdefer gc.dev.freeCommandBuffers(pool, @intCast(cmdbufs.len), cmdbufs.ptr);
 
     const clear: vk.ClearValue = .{
-        .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
+        .color = .{ .float_32 = .{ 0.5, 0.2, 0, 1 } },
     };
 
     const viewport: vk.Viewport = .{

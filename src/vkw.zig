@@ -1,7 +1,19 @@
+/// Copied mostly from:
+/// https://github.com/andrewrk/zig-vulkan-triangle/blob/master/src/GraphicsContext.zig
 const std = @import("std");
 const sdl = @import("sdl2");
 const vk = @import("vulkan");
 
+// List the api's and extensions wanted, there HAS to be redundancy in the numbers
+// because vk.features.version_1_2 does NOT automatically include vk.features.version_1_1,
+// likewise 1_1 does NOT include features 1_0.
+//
+// The ability to render to a window requires both the KHR surface and KHR swapchain. These
+// are both extensions because they are handled differently between platforms, thus they must
+// be explicitly included in the API.
+//
+// This vkAPIs struct is used during comp-time to generate available functions for the dispatch
+// tables
 pub const vkAPIs: []const vk.ApiInfo = &.{
     .{
         .base_commands = .{
@@ -17,20 +29,30 @@ pub const vkAPIs: []const vk.ApiInfo = &.{
     vk.extensions.khr_surface,
     vk.extensions.khr_swapchain,
 };
+const required_device_extensions = [_][*:0]const u8{vk.extensions.khr_swapchain.name};
 
 pub const Allocator = std.mem.Allocator;
+
+// "Dispatch Tables"
 pub const BaseDispatch = vk.BaseWrapper(vkAPIs);
 pub const InstanceDispatch = vk.InstanceWrapper(vkAPIs);
 pub const DeviceDispatch = vk.DeviceWrapper(vkAPIs);
+
+// "Proxying Wrappers" - I believe this means this struct represents
+// the handle and the dispatch table becoming unified.
 pub const Instance = vk.InstanceProxy(vkAPIs);
 pub const Device = vk.DeviceProxy(vkAPIs);
 
+// "Physical" device candidate
 const DeviceCandidate = struct {
     physical_device: vk.PhysicalDevice,
     props: vk.PhysicalDeviceProperties,
     queues: QueueAllocation,
 };
 
+// This name is kinda dumb because it's only called
+// "Allocation" due to the family indicies being acquired
+// from an alloc vulkan function.
 const QueueAllocation = struct {
     graphics_family: u32,
     present_family: u32,
@@ -62,8 +84,10 @@ pub const GraphicsContext = struct {
         var self: GraphicsContext = undefined;
         self.allocator = allocator;
 
+        // Use SDL to populate the vulkan dispatch table
         try sdl.vulkan.loadLibrary(null);
         const vkb = try BaseDispatch.load(try sdl.vulkan.getVkGetInstanceProcAddr());
+
         const extensions = try sdl.vulkan.getInstanceExtensionsAlloc(window, allocator);
         defer allocator.free(extensions);
 
@@ -74,6 +98,7 @@ pub const GraphicsContext = struct {
             .engine_version = vk.makeApiVersion(0, 0, 0, 0),
             .api_version = vk.API_VERSION_1_2,
         };
+
         // Basic zig-ified vulkan instance
         const instance_handle = try vkb.createInstance(&.{
             .p_application_info = &app_info,
@@ -94,6 +119,7 @@ pub const GraphicsContext = struct {
         errdefer instance.destroySurfaceKHR(surface, null);
 
         const physical_device = try pickPhysicalDevice(instance, allocator, surface);
+
         const priority = [_]f32{1};
         const qci = [_]vk.DeviceQueueCreateInfo{
             .{
@@ -108,12 +134,16 @@ pub const GraphicsContext = struct {
             },
         };
         const queue_count: u32 = if (physical_device.queues.graphics_family == physical_device.queues.present_family) 1 else 2;
+
+        // Get the 'Logical' device handle from the 'Physical' one.
         const device_handle = try instance.createDevice(physical_device.physical_device, &.{
             .queue_create_info_count = queue_count,
             .p_queue_create_infos = &qci,
             .enabled_extension_count = required_device_extensions.len,
             .pp_enabled_extension_names = @ptrCast(&required_device_extensions),
         }, null);
+
+        // Do the same thing as the VkInstance, wrap the handle and it's dispatch table into a a 'proxy'.
         const device_wrapper = try allocator.create(DeviceDispatch);
         errdefer allocator.destroy(device_wrapper);
         device_wrapper.* = try DeviceDispatch.load(device_handle, instance.wrapper.dispatch.vkGetDeviceProcAddr);
@@ -140,7 +170,9 @@ pub const GraphicsContext = struct {
     }
 };
 
-pub fn pickPhysicalDevice(
+/// Returns the first physical device that supports extensions and a surface,
+/// does not compare devices for optimal solution
+fn pickPhysicalDevice(
     instance: Instance,
     allocator: std.mem.Allocator,
     surface: vk.SurfaceKHR,
@@ -178,7 +210,6 @@ fn checkDeviceSuitable(instance: Instance, physical_device: vk.PhysicalDevice, s
     return null;
 }
 
-const required_device_extensions = [_][*:0]const u8{vk.extensions.khr_swapchain.name};
 fn checkExtensionSupport(
     instance: Instance,
     pdev: vk.PhysicalDevice,
